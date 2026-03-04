@@ -67,6 +67,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────
 DATA_DIR = Path("collected_data")
 OUTPUT_DIR = Path("smurf_output")
+SUPERVISED_MODEL_PATH = Path("smurf_model.pkl")  # train_supervised.py が作成する
 
 # ティアマッピング (tier数値 → ランク名)
 TIER_TO_RANK = {
@@ -834,7 +835,12 @@ class EnsembleSmurfDetector:
         self.pca = PCA(n_components=2)
         self.is_fitted = False
 
-        # モデル群
+        # 教師ありモデルの自動読み込み
+        self.supervised_model = None
+        self.supervised_feature_names: list[str] = []
+        self._load_supervised_model()
+
+        # 教師なしモデル群
         self.iso_forest = IsolationForest(
             n_estimators=300,
             contamination=contamination,
@@ -875,6 +881,25 @@ class EnsembleSmurfDetector:
             "gmm": 0.14,
             "rule_based": 0.18,
         }
+
+    def _load_supervised_model(self):
+        """smurf_model.pkl が存在する場合は読み込む"""
+        if not SUPERVISED_MODEL_PATH.exists():
+            return
+        try:
+            import pickle
+            with open(SUPERVISED_MODEL_PATH, "rb") as f:
+                obj = pickle.load(f)
+            self.supervised_model = obj["model"]
+            self.supervised_feature_names = obj["feature_names"]
+            auc  = obj.get("mean_auc", 0)
+            n    = obj.get("n_labeled", 0)
+            ns   = obj.get("n_smurf", 0)
+            date = obj.get("trained_at", "?")[:10]
+            print(f"[SUPERVISED] 教師ありモデル: AUC={auc:.4f}  ラベル数={n}({ns}スマーフ)  訓練日={date}")
+        except Exception as e:
+            print(f"[WARN] 教師ありモデル読み込み失敗: {e}")
+            self.supervised_model = None
 
     def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
         """スコアを0-100に正規化 (高い = スマーフ疑い)"""
@@ -984,6 +1009,32 @@ class EnsembleSmurfDetector:
             result.loc[noise_mask, "smurf_score"] + 5.0, 100.0
         )
         result["is_dbscan_noise"] = noise_mask.astype(int)
+
+        # ───── 教師ありモデルによるスコアブレンド ─────
+        if self.supervised_model is not None:
+            try:
+                # 利用可能な特徴量だけ抽出
+                avail_feats = [c for c in self.supervised_feature_names if c in result.columns]
+                X_sup = result[avail_feats].values.astype(float)
+                # NaN/Inf補完
+                meds = np.nanmedian(X_sup, axis=0)
+                for i in range(X_sup.shape[1]):
+                    mask = ~np.isfinite(X_sup[:, i])
+                    X_sup[mask, i] = meds[i]
+
+                sup_prob = self.supervised_model.predict_proba(X_sup)[:, 1]
+                sup_scores = sup_prob * 100.0
+                result["supervised_score"] = np.round(sup_scores, 1)
+
+                # ブレンド: 教師なしまたは教師ありを混合
+                # 教師ありの重み = 0.45 (教師なし = 0.55)
+                blended = 0.55 * result["smurf_score"].values + 0.45 * sup_scores
+                result["smurf_score"] = np.round(
+                    np.clip(self._normalize_scores(blended), 0, 100), 1
+                )
+                print(f"[SUPERVISED] 教師ありスコアをブレンドしました (45%暗算水+ 55%教師なし)")
+            except Exception as e:
+                print(f"[WARN] 教師ありブレンド失敗: {e}")
 
         # ───── 最終判定 ─────
         result["judgment"] = result["smurf_score"].apply(self._judge)
