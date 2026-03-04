@@ -35,7 +35,9 @@ PYTHON = sys.executable
 LABELED_CSV     = Path("labeled_data.csv")
 MODEL_PATH      = Path("smurf_model.pkl")
 FULL_RESULTS    = Path("smurf_output/smurf_results_full.csv")
-MIN_LABELS      = 30   # 教師あり学習の最低ライン
+MIN_LABELS      = 20   # 合計ラベル数の最低ライン
+MIN_SMURF       = 5    # スマーフ正例の最低必要数 (手動ラベリング)
+MIN_NORMAL      = 10   # 通常負例の最低必要数 (auto_label_normalsで補完)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RED    = "\033[91m"
@@ -115,52 +117,52 @@ def main():
         print(c("\n  [SKIP] update_data.py が見つかりません", YELLOW))
 
     # ─── ステップ3: 教師なし検出 ───
-    ok = run("smurf_ai.py", "3/5  教師なし異常検知 (smurf_ai.py)")
+    ok = run("smurf_ai.py", "3/6  教師なし異常検知 (smurf_ai.py)")
     if not ok:
         print(c("  smurf_ai.py が失敗しました。処理を中断します。", RED))
         sys.exit(1)
 
-    # ─── ステップ4: ラベリング状況を確認 ───
-    n_labels, n_smurf, n_normal = count_labels()  # 再確認
-    header("4/5  ラベリング状況確認")
+    # ─── ステップ4: 低スコアプレイヤーを自動ラベリング (label=0) ───
+    if Path("auto_label_normals.py").exists():
+        run("auto_label_normals.py", "4/6  通常プレイヤー自動ラベリング (auto_label_normals.py)")
 
-    if n_labels < MIN_LABELS:
-        need = MIN_LABELS - n_labels
-        print(c(f"  ⚠  教師ありモデルの学習には最低{MIN_LABELS}件のラベルが必要です", YELLOW))
-        print(f"     現在: {n_labels}件  あと {need} 件必要")
+    # ─── ステップ5: ラベリング状況を確認 ───
+    n_labels, n_smurf, n_normal = count_labels()  # 再確認
+    header("5/6  ラベリング状況確認")
+
+    if n_smurf < MIN_SMURF or n_normal < MIN_NORMAL:
+        print(c(f"  [!]  ラベルが不足  (スマーフ: {n_smurf}/{MIN_SMURF}必要  通常: {n_normal}/{MIN_NORMAL}必要)", YELLOW))
         print()
-        print(c("  ★ あなたがやること (1回だけ) ★", BOLD))
-        print(c("  ─────────────────────────────────────────────────────", YELLOW))
-        print(c("    python label_tool.py", BOLD))
-        print()
-        print("  スマーフっぽいプレイヤーの一覧が表示されます。")
-        print("  1 または 0 を押してラベルをつけてください。")
-        print("  50件ラベルしたら q で終了し、このスクリプトを再実行：")
-        print(c("    python run_pipeline.py", BOLD))
-        print(c("  ─────────────────────────────────────────────────────", YELLOW))
-        print()
+        if n_smurf < MIN_SMURF:
+            print(c("  ★ あなたがやること (これだけ) ★", BOLD))
+            print(c("  ─────────────────────────────────────────────────────", YELLOW))
+            print(c("    python label_tool.py", BOLD))
+            print()
+            print("  スマーフっぽいプレイヤーの一覧が表示されます。")
+            print(f"  1 を押すだけ。{MIN_SMURF}件以上ラベルしたら q で終了し、このスクリプトを再実行:")
+            print(c("    python run_pipeline.py", BOLD))
+            print(c("  ─────────────────────────────────────────────────────", YELLOW))
         if FULL_RESULTS.exists():
             import pandas as pd
             df = pd.read_csv(FULL_RESULTS)
             df["smurf_score"] = pd.to_numeric(df["smurf_score"], errors="coerce").fillna(0)
             suspects = df[df["smurf_score"] >= 55]
             print(f"  ラベリング候補: {len(suspects)}件 (スマーフスコア55+)")
-        print()
         print(c("  教師なし検出の結果は smurf_output/ に保存済みです。", GREEN))
         sys.exit(0)
 
     else:
-        print(c(f"  [OK] {n_labels}件のラベルがあります (スマーフ:{n_smurf} / 通常:{n_normal})", GREEN))
+        print(c(f"  [OK] {n_labels}件のラベル (スマーフ:{n_smurf} / 通常:{n_normal}) → 教師あり学習へ進みます", GREEN))
 
     # ─── ステップ5: 教師ありモデル訓練 ───
-    ok = run("train_supervised.py", "5/5  教師ありモデル訓練 (train_supervised.py)")
+    ok = run("train_supervised.py", "6/6  教師ありモデル訓練 (train_supervised.py)")
     if not ok:
         print(c("  train_supervised.py が失敗しました。", RED))
         sys.exit(1)
 
     # ─── ステップ6: 教師ありモデルが揃ったので再推論 ───
     if MODEL_PATH.exists():
-        if n_labels >= MIN_LABELS:
+        if n_smurf >= MIN_SMURF and n_normal >= MIN_NORMAL:
             header("6/6  教師ありモデルでスコアを再計算 (smurf_ai.py)")
             print("  (教師ありモデルのブレンドスコアで最終結果を生成します)")
             ok = run("smurf_ai.py", "最終推論 - smurf_ai.py")
