@@ -20,7 +20,7 @@ API呼び出し不要 - 完全ローカル実行。
   5. Gaussian Mixture     - 確率的クラスタリング
   6. ルールベースブースト - ドメイン知識による補正
 
-特徴量 (70+):
+特徴量 (75+):
   - 戦闘性能 (KD, KDA, HS%, ダメージ, スコア)
   - ラウンド正規化性能 (キル/R, ダメージ/R, スコア/R)
   - 安定性指標 (各種std, 変動係数)
@@ -33,6 +33,7 @@ API呼び出し不要 - 完全ローカル実行。
   - [NEW] MMR推移 (RR変動, Elo速度, 連勝パターン)
   - [NEW] 行動指標 (AFK, スポーン, エコノミー効率)
   - [NEW] ソーシャル指標 (ソロキュー率, パーティ)
+  - [NEW] デランク検出 (KD急落, 意図的低KDストリーク, KD二峰性)
 """
 
 import json
@@ -373,6 +374,33 @@ def extract_features(player_data: dict) -> dict | None:
     avg_kd_diff = np.mean(kd_diff_list)
     kd_diff_positive_rate = sum(1 for x in kd_diff_list if x > 0) / n if n > 0 else 0
 
+    # ──────── デランク・意図的負け検出 ────────
+    # KD < 0.3 の割合 (意図的負け / 捨て試合)
+    intentional_loss_rate = sum(1 for kd in kd_list if kd < 0.3) / n if n > 0 else 0
+
+    # 連続低KDストリーク最大値 (kd < 0.4 が続く = タンク期間)
+    _tank_streak = 0
+    tank_streak_max = 0
+    for _kd in kd_list:
+        if _kd < 0.4:
+            _tank_streak += 1
+            tank_streak_max = max(tank_streak_max, _tank_streak)
+        else:
+            _tank_streak = 0
+
+    # 高KD → 急落 の回数 (1.5以上 → 次の試合0.5以下)
+    kd_cliff_drops = sum(
+        1 for i in range(1, len(kd_list))
+        if kd_list[i - 1] >= 1.5 and kd_list[i] <= 0.5
+    )
+    kd_cliff_drop_rate = kd_cliff_drops / (n - 1) if n > 1 else 0
+
+    # KD二峰性スコア: 高KD率 × 低KD率
+    # 高いと「圧倒的な試合」と「捨て試合」が混在 = デランクスマーフの典型
+    _high_kd_rate = sum(1 for kd in kd_list if kd >= 1.5) / n if n > 0 else 0
+    _very_low_kd_rate = sum(1 for kd in kd_list if kd < 0.4) / n if n > 0 else 0
+    kd_bimodal_score = _high_kd_rate * _very_low_kd_rate
+
     # ═══════════════════════════════════════════════════════════
     # 新データソースからの特徴量 (mmr_v3, mmr_history, match_v4)
     # ═══════════════════════════════════════════════════════════
@@ -644,6 +672,12 @@ def extract_features(player_data: dict) -> dict | None:
         "avg_kd_diff": round(avg_kd_diff, 3),
         "kd_diff_positive_rate": round(kd_diff_positive_rate, 4),
 
+        # === デランク・意図的負け検出 ===
+        "intentional_loss_rate": round(intentional_loss_rate, 4),
+        "tank_streak_max": tank_streak_max,
+        "kd_cliff_drop_rate": round(kd_cliff_drop_rate, 4),
+        "kd_bimodal_score": round(kd_bimodal_score, 4),
+
         # === mmr_v3: シーズン・ピーク ===
         "peak_tier_v3": peak_tier_v3,
         "peak_rr": peak_rr,
@@ -713,6 +747,9 @@ FEATURE_COLS = [
     # 支配力
     "high_perf_rate", "dominant_rate",
     "avg_kd_diff", "kd_diff_positive_rate",
+    # === 新特徴量: デランク・意図的負け検出 ===
+    "intentional_loss_rate", "tank_streak_max",
+    "kd_cliff_drop_rate", "kd_bimodal_score",
     # === 新特徴量: mmr_v3 シーズン・ピーク ===
     "peak_tier_v3", "peak_current_gap_v3",
     "seasons_played", "first_season_tier", "latest_season_tier",
@@ -1071,6 +1108,36 @@ class EnsembleSmurfDetector:
             # --- ソロキュー率が高い (スマーフはソロで暴れがち) ---
             if solo_rate > 0.8 and kd > 1.5: s += 5
             elif solo_rate > 0.8 and kd > 1.3: s += 3
+
+            # ═══════════════════════════════════════
+            # デランク・意図的負けルール
+            # ═══════════════════════════════════════
+
+            bimodal = row.get("kd_bimodal_score", 0)
+            tank_streak = row.get("tank_streak_max", 0)
+            cliff_rate  = row.get("kd_cliff_drop_rate", 0)
+            inten_loss  = row.get("intentional_loss_rate", 0)
+
+            # --- KD二峰性: 圧倒的試合と捨て試合が混在 ---
+            # 例: 40%がKD1.5+、30%がKD0.4未満 → bimodal = 0.12
+            if bimodal > 0.12: s += 20
+            elif bimodal > 0.08: s += 12
+            elif bimodal > 0.05: s += 6
+
+            # --- 連続低KDストリーク (タンク期間の証拠) ---
+            if tank_streak >= 5: s += 18
+            elif tank_streak >= 3: s += 10
+            elif tank_streak >= 2: s += 4
+
+            # --- 高KD直後の急落頻度 ---
+            if cliff_rate > 0.15: s += 12
+            elif cliff_rate > 0.08: s += 6
+            elif cliff_rate > 0.04: s += 3
+
+            # --- 意図的負け率 (KD<0.3) ---
+            if inten_loss > 0.25: s += 15
+            elif inten_loss > 0.15: s += 8
+            elif inten_loss > 0.08: s += 4
 
             # ═══════════════════════════════════════
             # 減点ルール (通常プレイヤー判定)
