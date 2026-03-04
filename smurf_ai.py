@@ -84,6 +84,31 @@ TIER_TO_RANK = {
 
 RANK_PATCHED_TO_TIER = {v: k for k, v in TIER_TO_RANK.items()}
 
+# ─────────────────────────────────────────
+# ランク帯ごとの期待KD・HS% (コミュニティ統計より)
+# 低ランクなのに期待値を大幅に超えている → スマーフの最強シグナル
+# ─────────────────────────────────────────
+# (tier_min, tier_max): (expected_kd, kd_std, expected_hs, hs_std)
+RANK_EXPECTED_STATS: dict[tuple[int, int], tuple[float, float, float, float]] = {
+    (3,  5):  (0.74, 0.18, 0.14, 0.06),   # Iron
+    (6,  8):  (0.85, 0.19, 0.15, 0.06),   # Bronze
+    (9,  11): (0.95, 0.21, 0.16, 0.06),   # Silver
+    (12, 14): (1.05, 0.24, 0.17, 0.06),   # Gold
+    (15, 17): (1.15, 0.27, 0.18, 0.06),   # Platinum
+    (18, 20): (1.30, 0.30, 0.19, 0.06),   # Diamond
+    (21, 23): (1.50, 0.34, 0.21, 0.07),   # Ascendant
+    (24, 26): (1.70, 0.38, 0.22, 0.07),   # Immortal
+    (27, 27): (2.00, 0.42, 0.24, 0.08),   # Radiant
+}
+
+
+def _get_rank_expected(tier: int) -> tuple[float, float, float, float]:
+    """tierに対応する (期待KD, KD標準偏差, 期待HS%, HS%標準偏差) を返す"""
+    for (lo, hi), vals in RANK_EXPECTED_STATS.items():
+        if lo <= tier <= hi:
+            return vals
+    return (1.0, 0.25, 0.16, 0.06)  # デフォルト
+
 
 def _safe_div(a, b, default=0.0):
     """ゼロ除算安全"""
@@ -339,6 +364,18 @@ def extract_features(player_data: dict) -> dict | None:
     perf_rank_ratio_kd = _safe_div(avg_kd, effective_tier / 15.0)  # 15 = Plat1 を基準
     perf_rank_ratio_hs = _safe_div(avg_hs_pct, effective_tier / 15.0)
     perf_rank_ratio_dpr = _safe_div(avg_dpr, effective_tier / 15.0)
+
+    # ──────── ランク期待値正規化 (★最重要シグナル★) ────────
+    # 「このランク帯の平均プレイヤー」からの偏差をZスコア化
+    # +2.0 以上 = 明らかにランク不相応の実力 = スマーフ濃厚
+    _exp_kd, _exp_kd_std, _exp_hs, _exp_hs_std = _get_rank_expected(int(effective_tier))
+    kd_rank_deviation = (avg_kd - _exp_kd) / max(_exp_kd_std, 0.01)
+    hs_rank_deviation = (avg_hs_pct - _exp_hs) / max(_exp_hs_std, 0.01)
+
+    # HS% × KD 複合スコア
+    # 高HS%かつ高KDが同時に成立するのはスマーフ特有のシグナル
+    # Iron帯の通常プレイヤーは HS15%かつKD0.8、スマーフはHS25%かつKD2.0 など
+    hs_kd_compound = (avg_hs_pct / 100.0) * avg_kd
 
     # ──────── アカウント年齢関連 ────────
     # レベルが低いのに高パフォ = スマーフ
@@ -658,6 +695,11 @@ def extract_features(player_data: dict) -> dict | None:
         "perf_rank_ratio_dpr": round(perf_rank_ratio_dpr, 4),
         "perf_level_ratio": round(perf_level_ratio, 4),
 
+        # === ランク期待値正規化 (★新・最重要★) ===
+        "kd_rank_deviation": round(kd_rank_deviation, 4),
+        "hs_rank_deviation": round(hs_rank_deviation, 4),
+        "hs_kd_compound": round(hs_kd_compound, 5),
+
         # === アカウント活動 ===
         "match_frequency": round(match_frequency, 4),
         "activity_span_days": round(activity_span_days, 2),
@@ -739,6 +781,8 @@ FEATURE_COLS = [
     "rank_gap", "tier_range", "tier_trend",
     "perf_rank_ratio_kd", "perf_rank_ratio_hs",
     "perf_rank_ratio_dpr", "perf_level_ratio",
+    # === ランク期待値正規化 (★最重要★) ===
+    "kd_rank_deviation", "hs_rank_deviation", "hs_kd_compound",
     # アカウント
     "account_level", "current_tier", "match_frequency",
     "activity_span_days", "level_range",
@@ -800,7 +844,7 @@ class EnsembleSmurfDetector:
             bootstrap=True,
         )
         self.lof = LocalOutlierFactor(
-            n_neighbors=20,
+            n_neighbors=30,      # 1000人規模では20より安定
             contamination=contamination,
             novelty=False,
             metric="euclidean",
@@ -979,6 +1023,10 @@ class EnsembleSmurfDetector:
             perf_rank_kd = row.get("perf_rank_ratio_kd", 1.0)
             perf_lvl = row.get("perf_level_ratio", 1.0)
             agent_div = row.get("agent_diversity", 5)
+            kd_rank_dev = row.get("kd_rank_deviation", 0.0)
+            hs_rank_dev = row.get("hs_rank_deviation", 0.0)
+            hs_kd_comp  = row.get("hs_kd_compound", 0.0)
+            n_matches   = row.get("matches_count", 1)
             top_agent = row.get("top_agent_ratio", 0.3)
             kd_cv = row.get("kd_cv", 0.5)
             tier_trend = row.get("tier_trend", 0)
@@ -1000,6 +1048,37 @@ class EnsembleSmurfDetector:
             solo_rate = row.get("solo_queue_rate", 0.5)
             avg_games_season = row.get("avg_games_per_season", 50)
             first_tier = row.get("first_season_tier", 0)
+
+            # ══════════════════════════════════════════════════
+            # ★ ランク期待値偏差ルール (最重要・最高精度シグナル) ★
+            # kd_rank_deviation = (実KD - そのランクの期待KD) / 標準偏差
+            # +2.0 = 上位2.5%のパフォーマンス → 強いスマーフシグナル
+            # ══════════════════════════════════════════════════
+
+            # KD偏差が大きい = ランク不相応の実力
+            if kd_rank_dev >= 3.0:   s += 35  # 上位0.1% レベルの乖離
+            elif kd_rank_dev >= 2.0: s += 22  # 上位2.5%
+            elif kd_rank_dev >= 1.5: s += 12  # 上位7%
+            elif kd_rank_dev >= 1.0: s += 5   # 上位16%
+
+            # HS%偏差も大きい = より確実
+            if hs_rank_dev >= 2.5:   s += 15
+            elif hs_rank_dev >= 1.5: s += 8
+            elif hs_rank_dev >= 1.0: s += 4
+
+            # KD偏差 + HS偏差 が両方高い → 複合加点
+            if kd_rank_dev >= 2.0 and hs_rank_dev >= 1.5: s += 15
+
+            # HS%×KD複合スコアが高い (鋭い照準 + 多キル)
+            if hs_kd_comp >= 0.45:   s += 18  # HS30%×KD1.5 相当以上
+            elif hs_kd_comp >= 0.30: s += 10  # HS20%×KD1.5 相当
+            elif hs_kd_comp >= 0.20: s += 4
+
+            # 試合数が少ない場合は全スコアを抑制 (証拠不十分)
+            if n_matches < 5:
+                s *= 0.5
+            elif n_matches < 10:
+                s *= 0.75
 
             # --- 低レベル + 高パフォーマンス ---
             if lvl < 30:
@@ -1175,7 +1254,12 @@ class EnsembleSmurfDetector:
             return "🟢 通常プレイヤー"
 
     def _calc_confidence(self, row) -> str:
-        """モデル間の一致度で信頼度を計算"""
+        """モデル間の一致度と試合数で信頼度を計算"""
+        # 試合数が少ない場合はデータ不足で信頼度低
+        n_matches = row.get("matches_count", 20)
+        if n_matches < 5:
+            return "低(試合数不足)"
+
         scores = [
             row.get("iso_score", 50),
             row.get("lof_score", 50),
@@ -1186,9 +1270,14 @@ class EnsembleSmurfDetector:
         above_60 = sum(1 for s in scores if s >= 60)
         below_40 = sum(1 for s in scores if s <= 40)
 
-        if above_60 >= 3 or below_40 >= 3:
+        # kd_rank_deviation が高ければ信頼度を上乗せ
+        kd_dev = row.get("kd_rank_deviation", 0.0)
+        dev_bonus = kd_dev >= 2.0  # 偏差2以上なら信頼度+1
+
+        consensus = max(above_60, below_40)
+        if consensus >= 3 or (consensus >= 2 and dev_bonus):
             return "高"
-        elif above_60 >= 2 or below_40 >= 2:
+        elif consensus >= 2 or (consensus >= 1 and dev_bonus):
             return "中"
         else:
             return "低"
