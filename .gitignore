@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# API tokens (秘匿)
+henrik.py
+
+# 進捗ファイル
+collect_progress.json
+update_progress.json
+
+# APIレスポンスキャッシュ
+response.json
+
+# 旧バージョン
+smurf_detector.py
+smurf_results.csv
+smurf_analysis.png
+
+# 収集済みプレイヤー一覧
+collected_players.csv
+
+# 収集データ (個人情報含む)
+collected_data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
