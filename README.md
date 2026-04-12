@@ -1,11 +1,15 @@
 # VALORANT Smurf Detection AI
 
-教師なし学習アンサンブルモデルによるVALORANTスマーフアカウント検出システム。
+**教師なし学習アンサンブル** + **教師あり GradientBoosting** の二段構えによる  
+VALORANT スマーフアカウント検出システム。
 
-1002人のプレイヤーデータから **71の特徴量** を抽出し、  
-5つの異常検出モデル + ルールベースエンジンを統合して高精度にスマーフを判定します。
+1002人のプレイヤーデータから **78の特徴量** を抽出。  
+5つの異常検出モデル + ルールベースエンジン + 手動ラベルで訓練した教師ありモデルを統合し、  
+**PUUID を入力するだけで即座にスマーフ判定**を行います。
 
-![Overview](smurf_output/01_overview.png)
+![Flow Diagram](docs/images/flow_diagram.png)
+
+![Demo Output](docs/images/demo_output.png)
 
 ---
 
@@ -14,11 +18,12 @@
 - [概要](#概要)
 - [検出結果](#検出結果)
 - [アーキテクチャ](#アーキテクチャ)
-- [特徴量設計 (71次元)](#特徴量設計-71次元)
-- [モデル構成](#モデル構成)
+- [特徴量設計 (78次元)](#特徴量設計-78次元)
+- [モデル構成 (教師なし)](#モデル構成-教師なし)
 - [ルールベースエンジン](#ルールベースエンジン)
 - [パイプライン](#パイプライン)
 - [出力ファイル](#出力ファイル)
+- [🆕 教師ありモデル (即時 PUUID チェック)](#-教師ありモデル-即時-puuid-チェック)
 - [セットアップ](#セットアップ)
 - [使い方](#使い方)
 - [技術スタック](#技術スタック)
@@ -33,13 +38,16 @@
 
 ### 本プロジェクトのアプローチ
 
-**教師なし学習（Unsupervised Learning）** を採用しています。
+本プロジェクトは **2つのモデル** を組み合わせています。
 
-「スマーフかどうか」のラベル付きデータは存在しないため、教師あり学習は不可能です。  
-代わりに、**正常プレイヤー集団の中から統計的に異常なパターンを示すプレイヤーを検出**するアプローチを取りました。
+| フェーズ | 手法 | 用途 |
+|:---|:---|:---|
+| **Phase 1** | 教師なし学習アンサンブル | 1000人規模の一括分析 |
+| **Phase 2** | 教師あり GradientBoosting | PUUID 1件の即時リアルタイム判定 |
 
-複数の異常検出アルゴリズムを組み合わせたアンサンブルにより、  
-単一モデルでは拾えないスマーフの多面的な特徴を捉えています。
+**Phase 1 (教師なし)**: ラベルなしデータのみで動作。正常プレイヤー集団の中から統計的に異常なパターンを示すプレイヤーを検出します。
+
+**Phase 2 (教師あり)**: Phase 1 で得られた結果を元に手動ラベリングし、GradientBoosting を訓練。**PUUIDを入力するだけで誰でも即座に判定**できます。
 
 ---
 
@@ -121,7 +129,7 @@
 
 ---
 
-## 特徴量設計 (71次元)
+## 特徴量設計 (78次元)
 
 6つのデータソースから71の特徴量を抽出。スマーフの多面的な性質を捕捉するよう設計しています。
 
@@ -253,7 +261,7 @@
 
 ---
 
-## モデル構成
+## モデル構成 (教師なし)
 
 ### アンサンブル手法
 
@@ -421,6 +429,169 @@ STEP 5: 出力
 
 ---
 
+---
+
+## 🆕 教師ありモデル (即時 PUUID チェック)
+
+### 概要
+
+Phase 1 の一括分析で得られたデータを元に**手動ラベリング**を行い、  
+**GradientBoosting 分類器**（XGBoost / LightGBM / sklearn GB を自動選択）を訓練したモデルです。
+
+**PUUID を入力するだけで**、任意のプレイヤーをリアルタイムに判定できます。
+
+![Judgment Scale](docs/images/judgment_scale.png)
+
+---
+
+### 判定出力例
+
+```
+$ python -m smurf 26d91571-3e25-5727-b3c5-99563f4cddf8
+
+🔍  26d91571-3e25-5727-b3c5-99563f4cddf8
+  データ取得中... 完了
+
+════════════════════════════════════════════════════════
+  VALORANT スマーフ判定結果 (教師ありモデル)
+════════════════════════════════════════════════════════
+  プレイヤー     : KaiserBlitz#9999
+
+  ━━━ 判定 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🔴 スマーフ確定
+  スマーフ確率   : 97.3%  [████████████████████]
+
+  ━━━ プロフィール ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  現在ランク     : Silver 2
+  最高ランク     : Radiant          ← ランク乖離 21 段階
+  アカウントLv   : 32
+  試合数         : 58
+
+  ━━━ 戦闘指標 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  平均KD         : 2.47
+  平均HS%        : 31.2%
+  平均ダメージ   : 214
+  勝率           : 72.4%
+  KDランク偏差   : 3.82
+
+  ━━━ スマーフシグナル ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ランク乖離     : 21 段階
+  意図的負け率   : 43.1%
+  連続タンク     : 8 試合
+  ルールスコア   : 91 / 100
+
+  ⚠️  注目ポイント:
+     → KDがランク平均より大幅に高い
+     → 現在ランクと最高ランクが 21 段階乖離
+     → 意図的な負け行動が 43% のマッチで疑われる
+════════════════════════════════════════════════════════
+```
+
+---
+
+### 判定スケール
+
+| スマーフ確率 | 判定 | 意味 |
+|:---:|:---|:---|
+| 80%〜100% | 🔴 スマーフ確定 | 高信頼度でスマーフと分類 |
+| 55%〜79% | 🟠 スマーフ可能性高 | 複数の強いシグナルあり |
+| 35%〜54% | 🟡 グレーゾーン | 要注意。確定はできない |
+| 0%〜34% | 🟢 通常プレイヤー | 正常範囲内 |
+
+---
+
+### 使用特徴量 (53次元)
+
+教師ありモデルは以下の53特徴量を使用します（ルールスコアを含むリーク防止設計）。
+
+| カテゴリ | 特徴量 |
+|:---|:---|
+| 戦闘性能 | `avg_kd`, `avg_kda`, `avg_hs_pct`, `avg_dpr`, `avg_spr`, `avg_kpr`, `median_kd`, `median_kpr` |
+| 安定性 | `kd_std`, `kd_cv`, `kills_std`, `kills_cv`, `hs_std`, `hs_cv`, `dpr_std`, `dpr_cv`, `score_cv` |
+| 勝率・支配力 | `win_rate`, `max_win_streak`, `avg_margin` |
+| エージェント | `agent_diversity`, `top_agent_ratio` |
+| ランク乖離 ⭐ | `rank_gap`, `tier_range`, `tier_trend`, `perf_rank_ratio_kd`, `perf_rank_ratio_hs`, `perf_rank_ratio_dpr`, `perf_level_ratio` |
+| ランク期待値正規化 ⭐ | `kd_rank_deviation`, `hs_rank_deviation`, `hs_kd_compound` |
+| アカウント | `account_level`, `current_tier`, `match_frequency`, `activity_span_days` |
+| デランク検出 ⭐ | `intentional_loss_rate`, `tank_streak_max`, `kd_cliff_drop_rate`, `kd_bimodal_score` |
+| MMR / シーズン | `peak_tier_v3`, `peak_current_gap_v3`, `seasons_played`, `seasonal_rank_growth`, `seasonal_avg_winrate`, `avg_rr_change`, `positive_rr_rate`, `elo_velocity`, `max_rr_streak` |
+| 行動・エコノミー | `avg_afk_rounds`, `economy_efficiency`, `solo_queue_rate` |
+| ドメイン知識 | `rule_score` |
+
+⭐ = 特に重要度の高いカテゴリ
+
+---
+
+### アルゴリズムと学習パイプライン
+
+```
+ labeled_data.csv (手動ラベル)
+        │
+        ▼
+  特徴量行列 X  (53次元)
+  ラベル y    (0=通常, 1=スマーフ)
+        │
+        ├─── 5-fold Stratified CV ──── AUC 評価
+        │
+        ▼
+GradientBoosting 分類器
+(XGBoost 優先 → LightGBM → sklearn GB フォールバック)
+  ・sample_weight="balanced"  不均衡対策
+  ・scale_pos_weight=n_normal/n_smurf
+  ・n_estimators=300〜500, max_depth=5〜6
+        │
+        ▼
+  smurf_model.pkl  (保存)
+        │
+        ▼
+  smurf/ パッケージが自動読み込み
+  → python -m smurf <PUUID> で即時判定
+```
+
+#### 学習コマンド
+
+```bash
+# ラベリング (対話形式)
+python label_tool.py
+
+# 教師ありモデルを訓練
+python train_supervised.py
+```
+
+訓練後に生成される評価グラフ:
+
+| ファイル | 内容 |
+|:---|:---|
+| `smurf_output/04_feature_importance.png` | 特徴量重要度 TOP30 |
+| `smurf_output/05_confusion_matrix.png` | 混同行列 (5-fold 全val合計) |
+
+---
+
+### smurf パッケージ (Python API)
+
+```python
+from smurf import check
+
+result = check("26d91571-3e25-5727-b3c5-99563f4cddf8")
+
+print(result["judgment"])         # 🔴 スマーフ確定
+print(result["prob"])             # 0.973
+print(result["score"])            # 97.3
+print(result["player"])           # KaiserBlitz#9999
+print(result["current_rank"])     # Silver 2
+print(result["highest_rank"])     # Radiant
+print(result["rank_gap"])         # 21
+print(result["intentional_loss_rate"])  # 0.431
+```
+
+`check()` は内部で次の処理を行います:
+1. Henrik API からリアルタイムで試合データを取得 (キャッシュあり)
+2. 53特徴量を抽出
+3. `smurf_model.pkl` で推論
+4. 結果辞書を返す
+
+---
+
 ## セットアップ
 
 ### 必要環境
@@ -491,13 +662,38 @@ pip install numpy pandas scikit-learn matplotlib
 
 ## 使い方
 
-### スマーフ検出を実行
+### 📌 PUUID で即時チェック（誰でも使える）
+
+```bash
+# PUUID を引数として渡す
+python -m smurf 26d91571-3e25-5727-b3c5-99563f4cddf8
+
+# 引数なしで起動すると対話入力になる
+python -m smurf
+# → PUUID を入力 >
+```
+
+> [!NOTE]
+> PUUID とは VALORANT プレイヤーの固有IDです。  
+> [tracker.gg](https://tracker.gg/valorant) などのサイトで確認できます。
+
+### スマーフ検出を一括実行
 
 ```bash
 python smurf_ai.py
 ```
 
 実行後、`smurf_output/` に結果が出力されます。
+
+### 教師ありモデルを訓練する
+
+```bash
+# 1. ラベリング (対話形式, スキップ可)
+python label_tool.py
+
+# 2. 訓練& モデル保存 (smurf_model.pkl)
+python train_supervised.py
+```
 
 ### データ収集
 
